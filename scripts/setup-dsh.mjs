@@ -127,6 +127,7 @@ const MANAGED_MCP_IDS = ['mcp-snowluma', 'mcp-snowluma-host', 'mcp-web-search-sa
 
 function mcpEntries() {
   const node = process.execPath;
+  const version = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')).version;
   const servers = {
     'mcp-snowluma': { serverName: 'snowluma', script: path.join(REPO_ROOT, 'src', 'mcp-snowluma-safe.js'), toolCallTimeoutMs: 725000 },
     'mcp-snowluma-host': { serverName: 'snowluma-host', script: path.join(REPO_ROOT, 'src', 'mcp-host-server.js') },
@@ -144,6 +145,8 @@ function mcpEntries() {
     out += `        command: ${yamlSingleQuote(node)}\n`;
     out += `        args:\n`;
     out += `          - ${yamlSingleQuote(s.script)}\n`;
+    // 更新版本时改变启动参数，让 DSH 重新加载仍在内存中运行的旧 MCP 代码。
+    out += `          - ${yamlSingleQuote(`--bridge-version=${version}`)}\n`;
     // qq_wait_for_messages 最长可等 10 分钟；DSH 默认 60s 会提前掐断工具调用。
     if (s.toolCallTimeoutMs) out += `        toolCallTimeoutMs: ${s.toolCallTimeoutMs}\n`;
   }

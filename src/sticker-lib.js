@@ -49,13 +49,15 @@ export function sanitizeStickerText(value, max = 200) {
 
 export function normalizeStickerEntry(raw) {
   const entry = raw && typeof raw === 'object' ? raw : {};
-  const id = String(entry.id || entry.emoji_id || entry.resId || '').trim();
+  const id = String(entry.id || entry.emoji_id || entry.emojiId || entry.resId || '').trim();
   if (!id) return null;
   const tags = Array.isArray(entry.tags)
     ? entry.tags.map((t) => sanitizeStickerText(t, 24)).filter(Boolean).slice(0, 20)
     : [];
   return {
     id,
+    ...(entry.emojiId != null || entry.emoId != null || entry.emoji_id != null
+      ? { emojiId: String(entry.emojiId ?? entry.emoId ?? entry.emoji_id) } : {}),
     resId: String(entry.resId || entry.emoji_id || id).trim(),
     url: String(entry.url || '').trim(),
     md5: String(entry.md5 || '').trim().toUpperCase(),
@@ -125,17 +127,18 @@ export function mergeStickerLibrary(existing, fetched, { complete = true } = {})
   const byId = new Map(out.map((e) => [e.id, e]));
   const fetchedIds = new Set();
   for (const item of Array.isArray(fetched) ? fetched : []) {
-    const id = String(item?.emoji_id || item?.resId || item?.id || '').trim();
+    const id = String(item?.emoji_id || item?.emojiId || item?.resId || item?.id || '').trim();
     if (id) fetchedIds.add(id);
   }
   for (const item of Array.isArray(fetched) ? fetched : []) {
     if (!item || typeof item !== 'object') continue;
-    const id = String(item.emoji_id || item.resId || item.id || '').trim();
+    const id = String(item.emoji_id || item.emojiId || item.resId || item.id || '').trim();
     if (!id) continue;
     const old = byId.get(id);
     const merged = normalizeStickerEntry({
       ...(old || {}),
       id,
+      emojiId: item.emojiId ?? item.emoId ?? item.emoji_id ?? old?.emojiId,
       resId: String(item.resId || item.emoji_id || id).trim(),
       url: String(item.url || old?.url || '').trim(),
       md5: String(item.md5 || old?.md5 || '').trim().toUpperCase(),

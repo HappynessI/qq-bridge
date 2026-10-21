@@ -26,6 +26,8 @@ import { AUDIO_EXTS, cleanupTemp, describeAudio, formatBytes, formatDuration, in
 import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken } from './snowluma-conn.js';
 import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { onebotRequest } from './onebot-request.js';
+import { addFavoriteImage, setFavoriteRemark } from './sticker-gateway.js';
+import { modelImageContent } from './model-images.js';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
 import { createTokenLedger } from './token-ledger.js';
@@ -1913,7 +1915,6 @@ async function main() {
     segments.push({ type: 'image', data: { file: 'base64://' + image.buffer.toString('base64') } });
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
-    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
     // 与文本发送共用 sendChain，保证“先文字后表情”的真人顺序不被并发工具调用打乱。
     let sendResolve;
     let sendReject;
@@ -1926,21 +1927,7 @@ async function main() {
         // 真人发表情前通常会有短暂停顿，避免“文字刚发完表情立刻跟上”的机械感。
         await sleep(randInt(800, 2000));
         assertSendAllowed();
-        const res = await fetch(`${httpUrl}/${action}`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
-          },
-          body: JSON.stringify(params),
-          signal: AbortSignal.timeout(15000)
-        });
-        const body = await res.json().catch(() => ({}));
-        if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
-          const hint = res.status === 426 ? '（HTTP 426：snowluma.httpUrl 可能指向了 WebSocket 端口，请检查 config.json 的 snowluma.httpUrl 是否为 OneBot HTTP API 地址）' : '';
-          throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}${hint}`);
-        }
-        sendResolve(body.data);
+        sendResolve(await onebotRequest(cfg, action, params));
       } catch (error) {
         sendReject(error);
       }
@@ -1967,15 +1954,12 @@ async function main() {
   }
 
   // 修改 QQ 账号里的收藏表情备注（modify_custom_face），并同步本地 desc。
-  async function setStickerRemarkV2(stickerId, remark) {
+  async function setStickerRemarkV2(stickerId, remark, assertAllowed = () => {}) {
     const synced = await syncStickerLibrary(false);
     const entry = findSticker(synced?.entries ?? stickerEntries, stickerId);
     if (!entry) throw new Error(`找不到表情 ${stickerId}，请先用 qq_list_stickers 获取有效 id`);
     const cleanRemark = String(remark ?? '').trim().slice(0, 50);
-    const response = await bot.request('modify_custom_face', { emoji_id: entry.id, desc: cleanRemark });
-    if (!response || response.status !== 'ok' || response.retcode !== 0) {
-      throw new Error(`modify_custom_face 失败: ${response?.wording || response?.retcode || 'unknown'}`);
-    }
+    await setFavoriteRemark(cfg, entry, cleanRemark, assertAllowed);
     const updated = applyStickerNote(stickerEntries, entry.id, {});
     // 直接改 desc（保留本地认知）
     const idx = (updated.entries || []).findIndex((e) => e.id === entry.id);
@@ -1997,41 +1981,32 @@ async function main() {
     const mediaList = Array.isArray(found.media) ? found.media : [];
     if (!mediaList.length) throw new Error('这条消息没有可收藏的图片/表情');
     const media = mediaList[0];
-    let file = '';
-    if (media?.kind === 'image') {
-      // 优先取图片字节转 base64，避免 SnowLuma 直接下载聊天图片 URL 失败（带签名/防盗链）。
-      // 严禁把消息里的原始 media.url / media.file 直接交给 OneBot 去下载：那会绕过 SSRF/本地文件防护。
-      const img = await fetchOneBotImage(media);
-      if (img?.buffer) {
-        file = 'base64://' + img.buffer.toString('base64');
-      } else {
-        throw new Error('无法安全获取该图片字节，已拒绝收藏');
-      }
+    let image;
+    if (media?.kind === 'image' || media?.kind === 'sticker') {
+      // 只上传已经安全下载的原始字节，不能让网关重新访问消息里的 URL 或本地路径。
+      image = await fetchOneBotImage(media);
     } else if (media?.kind === 'face') {
-      const face = await fetchFaceMedia(media);
-      if (face?.buffer) file = 'base64://' + face.buffer.toString('base64');
+      image = await fetchFaceMedia(media);
     }
-    if (!file) throw new Error('无法获取该表情的图片源');
+    if (!image?.buffer) throw new Error('无法安全获取该图片字节，已拒绝收藏');
     assertSendAllowed();
-    const addRes = await bot.request('add_custom_face', { file });
-    if (!addRes || addRes.status !== 'ok' || addRes.retcode !== 0) {
-      throw new Error(`add_custom_face 失败: ${addRes?.wording || addRes?.retcode || 'unknown'}`);
-    }
-    const emojiId = String(addRes.data?.emoji_id || '');
-    if (!emojiId) throw new Error('add_custom_face 未返回 emoji_id');
+    const added = await addFavoriteImage(cfg, image, assertSendAllowed);
+    const emojiId = added.id;
+    // 收藏和备注分开报告，不能把备注失败伪装成收藏失败后再次添加。
+    const synced = await syncStickerLibrary(true);
+    let entry = findSticker(synced?.entries ?? stickerEntries, emojiId) || added;
     const maxRemarkChars = Math.max(1, Number(cfg.socialV2?.sticker?.collect?.maxRemarkChars) || 20);
     const cleanRemark = String(remark ?? '').trim().slice(0, maxRemarkChars);
+    let remarkError;
     if (cleanRemark) {
-      assertSendAllowed();
-      const modRes = await bot.request('modify_custom_face', { emoji_id: emojiId, desc: cleanRemark });
-      if (!modRes || modRes.status !== 'ok' || modRes.retcode !== 0) {
-        log(`[sticker] 收藏成功但备注失败 ${emojiId}: ${modRes?.wording || modRes?.retcode || 'unknown'}`);
+      try {
+        entry = await setStickerRemarkV2(emojiId, cleanRemark, assertSendAllowed);
+      } catch (error) {
+        remarkError = String(error?.message ?? error);
+        log(`[sticker] 收藏成功但备注失败 ${emojiId}: ${remarkError}`);
       }
     }
-    // 强制刷新本地库，让刚收藏的表情立即可用。
-    const synced = await syncStickerLibrary(true);
-    const entry = findSticker(synced?.entries ?? stickerEntries, emojiId);
-    return { emojiId, entry: entry || null, remark: cleanRemark };
+    return { emojiId, entry, remark: remarkError ? '' : cleanRemark, ...(remarkError ? { remarkError } : {}) };
   }
 
   function saveSlangStore() {
@@ -5491,7 +5466,7 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('setStickerRemark')) { sendJson({ ok: false, error: '工具未启用：qq_set_sticker_remark' }, 403); return; }
           try {
-            const entry = await setStickerRemarkV2(stickerId, String(body.remark ?? ''));
+            const entry = await setStickerRemarkV2(stickerId, String(body.remark ?? ''), captureSendGuard(key));
             log(`[sticker] 修改 QQ 收藏表情备注 ${key}: ${entry.id} -> ${entry.desc}`);
             sendJson({ ok: true, key, sticker: entry });
           } catch (error) {
@@ -5810,7 +5785,7 @@ async function main() {
             saveSocialV2State();
             log(`[sticker] AI 收藏表情 ${key}: ${result.emojiId}${result.remark ? '（备注：' + result.remark + '）' : ''}`);
             appendActivity(`${key} [sticker] AI 收藏表情：${result.remark || result.emojiId}`);
-            sendJson({ ok: true, key, sticker: result.entry, emojiId: result.emojiId, remark: result.remark });
+            sendJson({ ok: true, key, sticker: result.entry, emojiId: result.emojiId, remark: result.remark, ...(result.remarkError ? { remarkError: result.remarkError } : {}) });
           } catch (error) {
             const idx = st.stickerCollectTimes.indexOf(now);
             if (idx >= 0) st.stickerCollectTimes.splice(idx, 1);
@@ -7610,7 +7585,7 @@ async function main() {
           }
           totalBytes += face.buffer.length;
           if (face.text) parts.push({ type: 'text', text: face.text });
-          parts.push({ type: 'image', mediaType: face.mimeType || 'image/png', data: face.buffer.toString('base64'), name: `face-${media.faceId}.${(face.mimeType || 'png').split('/')[1]}` });
+          parts.push(...(await modelImageContent({ mimeType: face.mimeType || 'image/png', data: face.buffer.toString('base64') })).map(part => part.type === 'image' ? { type: 'image', mediaType: part.mimeType, data: part.data } : part));
         } else {
           parts.push({ type: 'text', text: face.text || `[表情#${media.faceId}]` });
         }
@@ -7626,7 +7601,7 @@ async function main() {
           }
           totalBytes += img.buffer.length;
           parts.push({ type: 'text', text: label });
-          parts.push({ type: 'image', mediaType: img.mimeType || 'image/jpeg', data: img.buffer.toString('base64'), name: `qq-${sticker ? 'sticker' : 'image'}-${index}.${(img.mimeType || 'image/jpeg').split('/')[1]}` });
+          parts.push(...(await modelImageContent({ mimeType: img.mimeType || 'image/jpeg', data: img.buffer.toString('base64') })).map(part => part.type === 'image' ? { type: 'image', mediaType: part.mimeType, data: part.data } : part));
         } else {
           parts.push({ type: 'text', text: `${label}（获取失败）` });
         }

@@ -45,7 +45,8 @@ export async function onebotRequest(config, action, params = {}, timeoutMs = 150
     throw new Error(`不支持的 OneBot transport: ${c.transport}`);
   }
   if (body?.status !== 'ok' || body.retcode !== 0) {
-    throw new Error(`OneBot ${action} 失败: retcode=${body?.retcode} ${body?.wording || body?.message || ''}`);
+    const detail = String(body?.wording || body?.message || '').replace(/base64:\/\/[A-Za-z0-9+/=]+/g, '[图片数据已省略]').slice(0, 500);
+    throw new Error(`OneBot ${action} 失败: retcode=${body?.retcode} ${detail}`);
   }
   return body.data;
 }

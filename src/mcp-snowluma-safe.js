@@ -20,6 +20,7 @@ import { z } from 'zod';
 import { SENSITIVE_RE } from './sensitive.js';
 import { serializeModelData } from './qq-model-view.js';
 import { onebotRequest } from './onebot-request.js';
+import { modelImageContent } from './model-images.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -1010,7 +1011,7 @@ if (cfg.socialV2?.tools?.getImages !== false) {
         for (const img of images) {
           if (img?.data && img?.mimeType) {
             textParts.push(`[${img.kind === 'face' ? '表情' : '图片'}${img.index ?? ''}${img.text ? ' ' + img.text : ''}]`);
-            content.push({ type: 'image', mimeType: img.mimeType, data: img.data });
+            content.push(...await modelImageContent(img));
           } else {
             textParts.push(`[${img.kind === 'face' ? '表情' : '图片'}${img.index ?? ''}${img.text ? ' ' + img.text : '（获取失败）'}]`);
           }
@@ -1074,7 +1075,7 @@ if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.getStickerI
         }
         const content = [
           { type: 'text', text: `表情 ${data.sticker?.id || stickerId}${data.sticker?.desc ? '（备注：' + data.sticker.desc + '）' : ''} 的图片内容：` },
-          { type: 'image', mimeType: data.image.mimeType, data: data.image.data }
+          ...await modelImageContent(data.image)
         ];
         return { content };
       } catch (error) {
@@ -1114,7 +1115,7 @@ if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.sendSticker
 if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.collectSticker !== false) {
   server.tool(
     'qq_collect_sticker',
-    '收藏当前会话里别人发的一张表情/图片到你的 QQ 收藏表情，并可写一句简短备注（如“好图偷了，兄弟”）。messageId 用 qq_get_unread_messages / qq_get_recent_messages 返回的 messageId 或 seq。注意：不要频繁收藏，只在真的觉得有意思/好用/戳中你时才偷图；收藏后你可以在 qq_list_stickers 里看到并继续使用。',
+    '收藏当前会话里别人发的一张表情/图片到你的 QQ 收藏表情，并可写一句简短备注（如“好图偷了，兄弟”）。messageId 用 qq_get_unread_messages / qq_get_recent_messages 返回的 messageId 或 seq。注意：不要频繁收藏，只在真的觉得有意思/好用/戳中你时才偷图；收藏后你可以在 qq_list_stickers 里看到并继续使用。失败时只根据工具错误说明原因，不能猜测图片过大；若返回 remarkError，表示已经收藏但备注未成功，不要重复收藏。',
     {
       key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
       token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
@@ -1127,7 +1128,7 @@ if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.collectStic
           method: 'POST',
           body: JSON.stringify({ key, messageId: String(messageId), remark: remark || '' }),
           headers: { 'x-agent-token': token },
-          timeoutMs: 60000
+          timeoutMs: 180000
         });
         return { content: [{ type: 'text', text: serializeModelData(data) }] };
       } catch (error) {
@@ -1210,7 +1211,7 @@ if (cfg.socialV2?.tools?.getSelfImage !== false) {
         return {
           content: [
             { type: 'text', text: '这是你的默认 Q 版形象：' },
-            { type: 'image', mimeType: data.image.mimeType, data: data.image.data }
+            ...await modelImageContent(data.image)
           ]
         };
       } catch (error) {
@@ -1327,7 +1328,7 @@ if (cfg.socialV2?.tools?.getForwardMsg !== false) {
             const mediaImages = Array.isArray(mediaRes?.images) ? mediaRes.images : [];
             for (const img of mediaImages) {
               if (img?.data && img?.mimeType) {
-                content.push({ type: 'image', mimeType: img.mimeType, data: img.data });
+                content.push(...await modelImageContent(img));
                 imageTexts.push(`[转发内图片${img.index != null ? ' ' + img.index : ''}${img.text ? ' ' + img.text : ''}]`);
               } else {
                 imageTexts.push(`[转发内图片${img.index != null ? ' ' + img.index : ''}（${img.text || '获取失败'}）]`);

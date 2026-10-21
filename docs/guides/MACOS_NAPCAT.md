@@ -58,6 +58,10 @@ node scripts/check-macos-live.mjs
 - 后台提醒附带正确的群会话 key，避免模型猜测目标群导致工具认证失败。
 - 主动检查参数保存后立即重新安排定时器。
 - 提供 macOS 后台服务、控制台入口和真实服务检查脚本。
+- 通过 `get_version_info` 识别 NapCat；收藏时将安全下载的原始图片分块上传到 NapCat，再调用 `add_custom_face`。不需要给 Docker 增加宿主机共享目录，上传临时文件五分钟后自动清理。
+- 兼容 NapCat 的 `emoId` / `resId` 和 `set_custom_face_desc`，收藏与备注均回读确认，备注失败会单独报告。收藏表情发送支持 WebSocket。
+- GIF 和 WebP 向模型提供最多三张 PNG 静态采样预览，保留原始图片用于收藏和发送。采样不能表示动画的全部动作。
+- MCP 启动参数携带桥接版本，安装新版本时触发 DSH 重载，避免继续运行旧代码。
 
 关键连接配置如下，字段名 snowluma 为兼容原项目而保留：
 
@@ -86,5 +90,15 @@ node scripts/check-macos-live.mjs
 - launchd 后台安装、停止、重新启动和重复安装成功；重启后的角色、群白名单和会话状态保留。
 - 禁用群的唤醒请求被 403 拒绝；无令牌的控制台 API 被 401 拒绝。
 - `check-macos-live.mjs` 真实调用 MCP → NapCat，并验证 OneBot 错误会抛出，不生成模拟结果。
+- 一张 500×500、99 帧的真实 GIF 经 MCP 返回三张 PNG，DSH 模型实际收到并描述了角色、电脑和杯子，未再出现 GIF 解码堆栈溢出。
+- 同一张原始 GIF 成功收藏并写入备注，NapCat 收藏列表回读确认；再次收藏复用已有记录。
+- 收藏表情通过 MCP 发送到测试群，`get_msg` 回读消息后下载图片，确认仍为 99 帧 GIF。
+- 运行目录中的表情自检 40 项通过。可使用只读脚本复查真实消息及已有收藏：
 
-语音库未配置；图片、表情收藏与合并转发等扩展能力未逐项实测，不列入本次通过项。
+```sh
+node scripts/check-media-live.mjs --root "$HOME/Library/Application Support/qq-bridge" --key group:你的群号 --message 消息ID --sticker 收藏ID
+```
+
+`--sticker` 可省略。脚本只读取图片和收藏，不发送消息、不添加收藏；不会打印会话令牌。模型是否正确理解图片仍需结合实际 DSH 回复判断。
+
+语音库未配置；合并转发等其他扩展能力未逐项实测，不列入本次通过项。
