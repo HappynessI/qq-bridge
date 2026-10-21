@@ -4,7 +4,9 @@ node_modules/
 
 # Runtime state and local config (never publish)
 state/
+work/
 config.json
+config.json.new
 *.log
 *.bak
 *.bak-*

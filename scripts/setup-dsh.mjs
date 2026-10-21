@@ -328,7 +328,9 @@ function autoInstallProfileBundles() {
   // Node cannot spawn npm's .cmd shim directly. Keep the shell command constant;
   // the validated (no quotes/control chars) profile travels through one quoted
   // environment expansion, with delayed expansion disabled to preserve '!'.
-  const cmd = windows ? (process.env.ComSpec || 'cmd.exe') : 'dsh';
+  const desktopCli = '/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh';
+  const cmd = windows ? (process.env.ComSpec || 'cmd.exe')
+    : process.platform === 'darwin' && fs.existsSync(desktopCli) ? desktopCli : 'dsh';
   const args = windows
     ? ['/d', '/v:off', '/s', '/c', 'dsh.cmd plugin --profile "%QQ_BRIDGE_SETUP_PROFILE%" install']
     : ['plugin', '--profile', PROFILE, 'install'];

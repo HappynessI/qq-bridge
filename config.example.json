@@ -13,6 +13,7 @@
     "maxInjectChars": 6000
   },
   "snowluma": {
+    "transport": "http",
     "wsUrl": "ws://127.0.0.1:3001",
     "httpUrl": "http://127.0.0.1:3000",
     "accessToken": "",

@@ -15,6 +15,7 @@
 // 这样换账号后无需手改任何配置，工具自动跟上。
 import fs from 'node:fs';
 import path from 'node:path';
+import { onebotRequest } from './onebot-request.js';
 
 /**
  * SnowLuma 主目录的常见位置。
@@ -116,6 +117,14 @@ export async function discoverSnowLumaConnection({
 } = {}) {
   const sl = cfg?.snowluma ?? cfg ?? {};
   const base = String(baseUrl || process.env.SNOWLUMA_HTTP_URL || sl.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+  if (sl.transport === 'websocket') {
+    try {
+      const self = await onebotRequest(sl, 'get_login_info', {}, timeoutMs);
+      return { ok: true, self, token: sl.accessToken || '', wsToken: sl.accessToken || '', wsUrl: sl.wsUrl, baseUrl: base, source: 'configured-websocket', tried: [] };
+    } catch (error) {
+      return { ok: false, error: error.message, tried: [] };
+    }
+  }
   const homes = homeDirs ?? snowLumaHomeCandidates({ cfg });
   const explicit = token || process.env.SNOWLUMA_TOKEN || sl.accessToken || '';
 

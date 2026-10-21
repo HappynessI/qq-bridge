@@ -5,7 +5,7 @@
 //   不暴露任何管理类动作（禁言、踢人、改群设置、文件上传下载等）。
 // - 发送类工具强制校验白名单：目标群/私聊必须命中 config.json 的
 //   allow.groups / allow.private，否则拒绝 —— agent 只能往被允许的地方发消息。
-// - 所有调用走 OneBot HTTP API（httpUrl + accessToken）。
+// - 调用使用配置的 OneBot HTTP 或正向 WebSocket。
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -19,6 +19,7 @@ import { z } from 'zod';
 // 在 MCP 里拦会连「安全拒绝理由」都拿不到，反而让模型无法把话说清楚。
 import { SENSITIVE_RE } from './sensitive.js';
 import { serializeModelData } from './qq-model-view.js';
+import { onebotRequest } from './onebot-request.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -50,14 +51,6 @@ function getAccess() {
   };
 }
 
-function getOneBotConfig() {
-  const c = getConfig();
-  return {
-    httpUrl: (c.snowluma?.httpUrl ?? 'http://127.0.0.1:3000').replace(/\/+$/, ''),
-    token: c.snowluma?.accessToken ?? ''
-  };
-}
-
 // 与 bridge.allowed 保持一致：allow 列表为空时按 allowAllWhenEmpty 放行
 function isAllowed(allowList, denyList, id, allowAllWhenEmpty) {
   const s = String(id);
@@ -85,22 +78,7 @@ function unquoteJsonString(value) {
 // 这里直接删除，避免以后有人以为 MCP 侧还有一道 CQ 转义而放松桥接那一层。
 
 async function onebot(action, params = {}) {
-  const { httpUrl, token } = getOneBotConfig();
-  const res = await fetch(`${httpUrl}/${action}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
-    body: JSON.stringify(params),
-    signal: AbortSignal.timeout(15000)
-  });
-  if (!res.ok) {
-    const hint = res.status === 426 ? '；HTTP 426 通常表示 httpUrl 指向了 WebSocket 端口，请检查 config.json 的 snowluma.httpUrl 是否为 OneBot HTTP API 地址' : '';
-    throw new Error(`HTTP ${res.status}${hint}`);
-  }
-  const body = await res.json();
-  if (body.status !== 'ok' || body.retcode !== 0) {
-    throw new Error(`OneBot ${action} 失败: retcode=${body.retcode} ${body.wording ?? ''}`);
-  }
-  return body.data;
+  return onebotRequest(getConfig(), action, params);
 }
 
 // 桥接控制台/内部 Agent API 访问：二代仿真模式的状态工具都通过这里读写桥接内存态。

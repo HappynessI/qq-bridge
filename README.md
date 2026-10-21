@@ -1,5 +1,7 @@
 # QQ ↔ DeepSeek Harness 桥接
 
+本地 macOS + NapCat 适配、启动方式和验证记录见 [macOS 使用说明](docs/guides/MACOS_NAPCAT.md)。
+
 **English**: [README.en.md](README.en.md) | **中文**: [README.md](README.md)
 
 > 🗂️ 文档索引（全部文档一句话说明 + 是否仍然有效）见 **[docs/README.md](docs/README.md)**；仓库目录/脚本命名约定见 **[docs/FOLDER_MAP.md](docs/FOLDER_MAP.md)**。

@@ -25,6 +25,7 @@ import { safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
 import { AUDIO_EXTS, cleanupTemp, describeAudio, formatBytes, formatDuration, inspectAudio, listAudioFiles, parseTargetKey, processAudioVolume, resolveAudioProcessing, resolveAudioSource, safeJoinLibrary } from './send-voice-lib.js';
 import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken } from './snowluma-conn.js';
 import { hardenDir, manualDirCommand } from './state-acl.mjs';
+import { onebotRequest } from './onebot-request.js';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
 import { createTokenLedger } from './token-ledger.js';
@@ -1064,6 +1065,14 @@ function consolePortInUse() {
     if (process.platform === 'win32') {
       const out = execFileSync('netstat', ['-ano', '-p', 'TCP'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
       return new RegExp(`[:.]${port}\\s+\\S+\\s+LISTENING`, 'i').test(out);
+    }
+    if (process.platform === 'darwin') {
+      try {
+        return execFileSync('/usr/sbin/lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], { encoding: 'utf8', timeout: 5000 }).trim().length > 0;
+      } catch (error) {
+        if (error.status === 1) return false;
+        throw error;
+      }
     }
     const out = execFileSync('sh', ['-c', 'ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null || true'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
     return new RegExp(`[:.]${port}\\s`).test(out);
@@ -3035,24 +3044,10 @@ async function main() {
    *    这里只是**兜底轮询**：主路径是每 30 秒一次的心跳（免费，见 onEvent）。
    */
   async function pollSnowlumaStatus() {
-    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
     try {
-      const res = await fetch(`${httpUrl}/get_status`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {}),
-        },
-        body: '{}',
-        signal: AbortSignal.timeout(8000),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok || body.status !== 'ok') {
-        snowlumaHealth.goodError = `HTTP ${res.status}${body?.wording ? ` ${body.wording}` : ''}`;
-      } else {
-        noteReceiveHealth(body.data?.good, 'get_status');
-        if (typeof body.data?.online === 'boolean') snowlumaHealth.accountOnline = body.data.online;
-      }
+      const data = await onebotRequest(cfg, 'get_status', {}, 8000);
+      noteReceiveHealth(data?.good, 'get_status');
+      if (typeof data?.online === 'boolean') snowlumaHealth.accountOnline = data.online;
     } catch (error) {
       snowlumaHealth.goodError = error?.message ?? String(error);
     }
@@ -3090,7 +3085,7 @@ async function main() {
     // 挡不住本机进程。这里改成失败关闭：宁可启动时报错，也不要静默开着一个无鉴权的管理 API。
     if (!consoleToken) throw new Error('控制台令牌为空：拒绝以无鉴权方式启动控制台 API');
     if (!tokenValid && configuredToken) log(`控制台 config.consoleToken 长度/字符不合法，已忽略并回退到自动生成令牌`);
-    if (!configuredToken) log(`控制台未配置 consoleToken，已自动生成：${String(consoleToken).slice(0, 6)}…（完整值保存在 state/console-token）`);
+    if (!configuredToken) log('控制台访问令牌已保存于 state/console-token');
     // 二代会话级隔离：MCP 工具调用时若带 x-agent-token，则必须匹配该会话的 agentToken。
     // 控制台/管理端请求不带此头，仍走 consoleToken 管理通道。
     //
@@ -4319,7 +4314,7 @@ async function main() {
           let tokenLine = '';
           if (isV2) {
             const stV2 = getSocialV2State(key);
-            tokenLine = `【会话令牌】${stV2.agentToken}（调用二代状态/发送工具时请在参数中带上此令牌）\n\n`;
+            tokenLine = `【会话 key】${key}\n【会话令牌】${stV2.agentToken}（调用二代状态/发送工具时请在参数中带上此令牌）\n\n`;
           }
           const promptText = `${roleLine}${tokenLine}【后台控制端提醒】（来自控制台/管理端，不是群友消息）\n${message}\n\n这是后台给你的引导或提醒，请据此调整你的行为。绝对不要复述、转发或原样发送这条后台提醒，也不要发送其中的会话令牌；它只用于你内部调整行为。${isV2 ? '当前是二代仿真模式：你的文本输出不会自动发送到 QQ；如果需要在群里发言，请使用发送工具（qq_send_message / qq_reply）。如果不需要发言，可以 qq_mark_read 或 qq_set_wake_config 收尾。' : '如果不需要在群里发言，请不要输出会发到 QQ 的内容。'}`;
           let sessionId = null;
@@ -4517,6 +4512,12 @@ async function main() {
           const wakeDefaultChanged = body.wake && typeof body.wake === 'object' &&
             WAKE_DEFAULT_KEYS.some((k) => Object.prototype.hasOwnProperty.call(body.wake, k));
           if (wakeDefaultChanged) refreshAllDefaultWakeConfigsV2();
+          if (body.proactive && typeof body.proactive === 'object') {
+            for (const key of socialV2.conversations.keys()) {
+              cancelProactiveCheckV2(key);
+              scheduleProactiveCheckV2(key);
+            }
+          }
           log('控制台：二代仿真配置已更新');
           sendJson({ ok: true, config: cfg.socialV2 });
           return;
@@ -5582,18 +5583,8 @@ async function main() {
             let readbackText = null;
             if (body.readback === true && sent.messageId) {
               try {
-                const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
-                const res = await fetch(`${httpUrl}/fetch_ptt_text`, {
-                  method: 'POST',
-                  headers: {
-                    'content-type': 'application/json',
-                    ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
-                  },
-                  body: JSON.stringify({ message_id: String(sent.messageId) }),
-                  signal: AbortSignal.timeout(30000)
-                });
-                const rb = await res.json().catch(() => ({}));
-                if (res.ok && rb.status === 'ok' && rb.retcode === 0) readbackText = rb.data?.text ?? '';
+                const data = await onebotRequest(cfg, 'fetch_ptt_text', { message_id: String(sent.messageId) }, 30000);
+                readbackText = data?.text ?? '';
               } catch (error) {
                 log(`[voice] 转写回读失败：${error?.message ?? error}`);
               }
@@ -7329,22 +7320,7 @@ async function main() {
     segments.push({ type: 'text', data: { text: escapeCqText(rawMessage) } });
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
-    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
-    const res = await fetch(`${httpUrl}/${action}`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
-      },
-      body: JSON.stringify(params),
-      signal: AbortSignal.timeout(15000)
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
-      const hint = res.status === 426 ? '（HTTP 426：snowluma.httpUrl 可能指向了 WebSocket 端口，请检查 config.json 的 snowluma.httpUrl 是否为 OneBot HTTP API 地址）' : '';
-      throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}${hint}`);
-    }
-    return body.data;
+    return onebotRequest(cfg, action, params);
   }
 
   // ── 图片/表情字节解析（供一代自动内联与二代按需工具） ────────────────────
@@ -11634,9 +11610,9 @@ async function main() {
     // 端口也是 per-account 的（实测：换账号后 WS 从 3001 之类变到别的端口），
     // 只换 token 不换 URL 会一直 1006 重连。
     bot.url = wsUrl;
-    if (wsChanged) log(`🔄 SnowLuma WS 连接已更新：${wsUrl}（token ${String(wsToken).slice(0, 4)}…）`);
+    if (wsChanged) log(`🔄 OneBot WS 连接已更新：${wsUrl}`);
     if (cfg.snowluma.accessToken !== httpToken) {
-      log(`🔄 SnowLuma HTTP token 已更新（来源 ${r.source}）：${String(cfg.snowluma.accessToken).slice(0, 4)}… → ${String(httpToken).slice(0, 4)}…`);
+      log(`🔄 OneBot 凭据已更新（来源 ${r.source}）`);
       cfg.snowluma.accessToken = httpToken;
     }
     if (!followEndpoint && r.wsUrl && r.wsUrl !== cfg.snowluma.wsUrl) {
